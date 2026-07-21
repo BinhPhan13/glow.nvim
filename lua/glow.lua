@@ -141,16 +141,15 @@ local function open_window(cmd_args)
   local chan = vim.api.nvim_open_term(buf, {})
 
   -- callback for handling output from process
-  local function on_output(err, data)
-    if err then
-      -- what should we really do here?
-      err(vim.inspect(err))
+  local function on_output(read_err, data)
+    if read_err then
+      err(vim.inspect(read_err))
     end
     if data then
-      local lines = vim.split(data, "\n", {})
-      for _, d in ipairs(lines) do
-        vim.api.nvim_chan_send(chan, d .. "\r\n")
-      end
+      -- forward raw bytes to the terminal so ANSI escape sequences stay intact;
+      -- only normalize line endings to CRLF (splitting the stream here would
+      -- break color codes that span read-chunk boundaries)
+      vim.api.nvim_chan_send(chan, (data:gsub("\r?\n", "\r\n")))
     end
   end
 
@@ -165,11 +164,21 @@ local function open_window(cmd_args)
     cleanup()
   end
 
+  -- glow disables colors when its stdout is a pipe (not a tty), so force them
+  -- on. inherit the current environment so glow keeps HOME and the user's real
+  -- COLORTERM/TERM (which decide the color depth glow emits).
+  local env = {}
+  for k, v in pairs(vim.fn.environ()) do
+    table.insert(env, string.format("%s=%s", k, v))
+  end
+  table.insert(env, "CLICOLOR_FORCE=1")
+
   -- setup and kickoff process
   local cmd = table.remove(cmd_args, 1)
   local job_opts = {
     args = cmd_args,
     stdio = { nil, job.stdout, job.stderr },
+    env = env,
   }
 
   job.handle = vim.loop.spawn(cmd, job_opts, vim.schedule_wrap(on_exit))
