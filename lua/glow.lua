@@ -293,22 +293,32 @@ local function is_md_ext(ext)
 end
 
 --------------------------------------------------------------------------------
--- Glow mode: a global toggle (:GlowToggle). While enabled, every markdown
--- buffer shown in a window is rendered with glow (a read-only, colored preview);
--- non-markdown buffers are left untouched. To edit, toggle glow mode off, edit,
--- then toggle it back on.
+-- Glow preview: :GlowToggle flips the current buffer between the glow-rendered
+-- preview (a read-only, colored terminal buffer) and the editable source.
 --------------------------------------------------------------------------------
 
 ---@class GlowMode
 local glow_mode = {
-  enabled = false,
   ---@type table<integer, integer> source buffer -> preview (terminal) buffer
   preview_of = {},
   ---@type table<integer, integer> preview buffer -> source buffer
   source_of = {},
-  ---@type integer? autocmd group id
-  augroup = nil,
+  ---@type table<integer, boolean> source buffers the user toggled preview on for
+  enabled = {},
 }
+
+-- delete a source buffer's cached preview (so the next show re-renders fresh)
+---@param source_buf integer
+local function glow_mode_drop(source_buf)
+  local preview_buf = glow_mode.preview_of[source_buf]
+  if preview_buf then
+    glow_mode.source_of[preview_buf] = nil
+    glow_mode.preview_of[source_buf] = nil
+    if vim.api.nvim_buf_is_valid(preview_buf) then
+      pcall(vim.api.nvim_buf_delete, preview_buf, { force = true })
+    end
+  end
+end
 
 -- render `source_buf` with glow into a (cached) preview terminal buffer and show
 -- it in `win`
@@ -331,7 +341,7 @@ local function glow_mode_show(source_buf, win)
     -- "hide" (not "wipe") so the preview survives being swapped out of a window
     vim.api.nvim_buf_set_option(preview_buf, "bufhidden", "hide")
     vim.api.nvim_buf_set_option(preview_buf, "filetype", "glowpreview")
-    -- q is a convenient way to turn glow mode back off
+    -- q flips this buffer back to source
     vim.keymap.set("n", "q", function()
       glow.toggle()
     end, { silent = true, buffer = preview_buf, nowait = true })
@@ -350,79 +360,16 @@ local function glow_mode_show(source_buf, win)
   end
 end
 
--- if the current window shows a markdown source buffer, render it with glow
-local function glow_mode_refresh_current_win()
-  if not glow_mode.enabled then
-    return
-  end
+-- restore the preview when returning to a buffer the user toggled on (nav back
+-- to a toggled source shows the source, not its preview, without this)
+local function glow_mode_restore()
   local win = vim.api.nvim_get_current_win()
   local b = vim.api.nvim_win_get_buf(win)
-  -- skip our own preview buffers (avoids any re-entrancy)
-  if glow_mode.source_of[b] then
+  -- already showing a preview, or not one we were asked to preview
+  if glow_mode.source_of[b] or not glow_mode.enabled[b] then
     return
   end
-  if is_markdown_buf(b) then
-    glow_mode_show(b, win)
-  end
-end
-
-local function glow_mode_enable()
-  if glow_mode.enabled then
-    return
-  end
-  if vim.fn.executable(glow.config.glow_path) == 0 then
-    err(string.format("could not execute glow binary in path=%s", glow.config.glow_path))
-    return
-  end
-
-  glow_mode.enabled = true
-  local group = vim.api.nvim_create_augroup("GlowMode", { clear = true })
-  glow_mode.augroup = group
-
-  -- render markdown buffers as they are shown in a window
-  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "BufEnter" }, {
-    group = group,
-    callback = glow_mode_refresh_current_win,
-  })
-
-  -- render markdown buffers already visible right now
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
-    local b = vim.api.nvim_win_get_buf(win)
-    if is_markdown_buf(b) and not glow_mode.source_of[b] then
-      glow_mode_show(b, win)
-    end
-  end
-end
-
-local function glow_mode_disable()
-  if not glow_mode.enabled then
-    return
-  end
-  glow_mode.enabled = false
-  if glow_mode.augroup then
-    pcall(vim.api.nvim_del_augroup_by_id, glow_mode.augroup)
-    glow_mode.augroup = nil
-  end
-
-  -- restore the source buffer in any window currently showing a preview
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
-    if vim.api.nvim_win_is_valid(win) then
-      local b = vim.api.nvim_win_get_buf(win)
-      local src = glow_mode.source_of[b]
-      if src and vim.api.nvim_buf_is_valid(src) then
-        vim.api.nvim_win_set_buf(win, src)
-      end
-    end
-  end
-
-  -- drop all preview buffers
-  for _, preview_buf in pairs(glow_mode.preview_of) do
-    if vim.api.nvim_buf_is_valid(preview_buf) then
-      pcall(vim.api.nvim_buf_delete, preview_buf, { force = true })
-    end
-  end
-  glow_mode.preview_of = {}
-  glow_mode.source_of = {}
+  glow_mode_show(b, win)
 end
 
 local function run(opts)
@@ -539,15 +486,40 @@ local function create_autocmds()
 
   vim.api.nvim_create_user_command("GlowToggle", function()
     glow.toggle()
-  end, { desc = "Toggle glow mode: render every markdown buffer with glow" })
+  end, { desc = "Toggle glow preview for the current buffer" })
+
+  -- re-show the preview for toggled-on buffers when navigating back to them.
+  -- BufWinEnter only: fires when a buffer is displayed in a window (the return
+  -- case), without the churn WinEnter/BufEnter add while cycling windows.
+  local group = vim.api.nvim_create_augroup("GlowMode", { clear = true })
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    group = group,
+    callback = glow_mode_restore,
+  })
 end
 
--- toggle glow mode: while on, every markdown buffer is rendered with glow
+-- toggle the glow preview for the current buffer (preview <-> source)
 glow.toggle = function()
-  if glow_mode.enabled then
-    glow_mode_disable()
+  local win = vim.api.nvim_get_current_win()
+  local b = vim.api.nvim_win_get_buf(win)
+  local src = glow_mode.source_of[b]
+  if src then
+    -- showing preview -> back to source
+    glow_mode.enabled[src] = nil
+    if vim.api.nvim_buf_is_valid(src) then
+      vim.api.nvim_win_set_buf(win, src)
+    end
+    glow_mode_drop(src)
+  elseif is_markdown_buf(b) then
+    -- showing source -> render preview
+    if vim.fn.executable(glow.config.glow_path) == 0 then
+      err(string.format("could not execute glow binary in path=%s", glow.config.glow_path))
+      return
+    end
+    glow_mode.enabled[b] = true
+    glow_mode_show(b, win)
   else
-    glow_mode_enable()
+    err("glow preview only works on markdown files")
   end
 end
 

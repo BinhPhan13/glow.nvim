@@ -108,16 +108,11 @@ require('glow').setup({
 
 You can also close the floating window using `q` or `<Esc>` keys
 
-### Glow mode (render markdown in place)
+### Toggle preview in place
 
 ```
 :GlowToggle
 ```
 
-Toggles a global "glow mode". While it is on, **every markdown buffer** shown in
-a window is rendered in place with glow (a read-only, colored preview); any
-non-markdown buffer is left untouched. Opening or switching to another markdown
-file while glow mode is on renders it automatically.
-
-To edit again, run `:GlowToggle` (or press `q` in the preview) to turn glow mode
-off, make your changes, then toggle it back on.
+Flips the current markdown buffer between the glow-rendered preview (a read-only,
+colored view) and the editable source. `q` in a preview flips it back to source.
