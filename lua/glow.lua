@@ -7,7 +7,8 @@ local buf
 ---@type string tmp file path
 local tmpfile
 
-local job = {}
+---@type function? stops the current cancelable (float) glow render
+local current_job_stop
 
 -- types
 ---@alias border 'shadow' | 'none' | 'double' | 'rounded' | 'solid' | 'single' | 'rounded'
@@ -55,21 +56,10 @@ local function safe_close(h)
 end
 
 local function stop_job()
-  if job == nil then
-    return
+  if current_job_stop ~= nil then
+    current_job_stop()
+    current_job_stop = nil
   end
-  if not job.stdout == nil then
-    job.stdout:read_stop()
-    safe_close(job.stdout)
-  end
-  if not job.stderr == nil then
-    job.stderr:read_stop()
-    safe_close(job.stderr)
-  end
-  if not job.handle == nil then
-    safe_close(job.handle)
-  end
-  job = nil
 end
 
 local function close_window()
@@ -90,8 +80,108 @@ local function tmp_file()
   return tmp
 end
 
----@param cmd_args table glow command arguments
-local function open_window(cmd_args)
+-- glow disables colors when its stdout is a pipe (not a tty), so force them on.
+-- inherit the current environment so glow keeps HOME and the user's real
+-- COLORTERM/TERM (which decide the color depth glow emits).
+---@return table env list of "KEY=VALUE" strings
+local function build_env()
+  local env = {}
+  for k, v in pairs(vim.fn.environ()) do
+    table.insert(env, string.format("%s=%s", k, v))
+  end
+  table.insert(env, "CLICOLOR_FORCE=1")
+  return env
+end
+
+-- build glow's argument vector for `file`, wrapped at `width` columns
+---@param file string markdown file to render
+---@param width integer wrap width passed to glow (-w)
+---@param use_pager boolean whether to enable glow's pager (-p)
+---@return table cmd_args
+local function glow_cmd(file, width, use_pager)
+  local cmd_args = { glow.config.glow_path, "-s", glow.config.style }
+  if use_pager then
+    table.insert(cmd_args, "-p")
+  end
+  table.insert(cmd_args, "-w")
+  table.insert(cmd_args, width)
+  table.insert(cmd_args, file)
+  return cmd_args
+end
+
+-- spawn glow (`cmd_args`) and stream its colored output into a terminal channel
+-- on `buf`. `on_done` (optional) runs, scheduled, when glow exits. Returns a
+-- self-contained stop() that closes this render's pipes/handle (also called
+-- automatically when glow exits), so each render manages its own lifecycle.
+---@param buf integer buffer to attach the terminal channel to
+---@param cmd_args table glow argument vector (glow_path first)
+---@param on_done function? called when the process exits
+---@return function stop
+local function spawn_glow(buf, cmd_args, on_done)
+  -- term to receive data
+  local chan = vim.api.nvim_open_term(buf, {})
+  local stdout = vim.loop.new_pipe(false)
+  local stderr = vim.loop.new_pipe(false)
+  local handle
+  local stopped = false
+
+  local function stop()
+    if stopped then
+      return
+    end
+    stopped = true
+    if stdout ~= nil then
+      pcall(function()
+        stdout:read_stop()
+      end)
+      safe_close(stdout)
+    end
+    if stderr ~= nil then
+      pcall(function()
+        stderr:read_stop()
+      end)
+      safe_close(stderr)
+    end
+    if handle ~= nil then
+      safe_close(handle)
+    end
+  end
+
+  -- callback for handling output from process
+  local function on_output(read_err, data)
+    if read_err then
+      err(vim.inspect(read_err))
+    end
+    if data then
+      -- forward raw bytes to the terminal so ANSI escape sequences stay intact;
+      -- only normalize line endings to CRLF (splitting the stream here would
+      -- break color codes that span read-chunk boundaries). pcall guards against
+      -- the buffer/channel being closed mid-render.
+      pcall(vim.api.nvim_chan_send, chan, (data:gsub("\r?\n", "\r\n")))
+    end
+  end
+
+  -- setup and kickoff process
+  local cmd = table.remove(cmd_args, 1)
+  handle = vim.loop.spawn(cmd, {
+    args = cmd_args,
+    stdio = { nil, stdout, stderr },
+    env = build_env(),
+  }, vim.schedule_wrap(function()
+    stop()
+    if on_done then
+      on_done()
+    end
+  end))
+  vim.loop.read_start(stdout, vim.schedule_wrap(on_output))
+  vim.loop.read_start(stderr, vim.schedule_wrap(on_output))
+
+  return stop
+end
+
+-- open the floating preview window and render `file` into it with glow
+---@param file string markdown file to preview
+local function open_window(file)
   local width = vim.o.columns
   local height = vim.o.lines
   local height_ratio = glow.config.height_ratio or 0.7
@@ -108,10 +198,6 @@ local function open_window(cmd_args)
   if glow.config.height and glow.config.height < win_height then
     win_height = glow.config.height
   end
-
-  -- pass through calculated window width
-  table.insert(cmd_args, "-w")
-  table.insert(cmd_args, win_width)
 
   local win_opts = {
     style = "minimal",
@@ -137,53 +223,10 @@ local function open_window(cmd_args)
   vim.keymap.set("n", "q", close_window, keymaps_opts)
   vim.keymap.set("n", "<Esc>", close_window, keymaps_opts)
 
-  -- term to receive data
-  local chan = vim.api.nvim_open_term(buf, {})
-
-  -- callback for handling output from process
-  local function on_output(read_err, data)
-    if read_err then
-      err(vim.inspect(read_err))
-    end
-    if data then
-      -- forward raw bytes to the terminal so ANSI escape sequences stay intact;
-      -- only normalize line endings to CRLF (splitting the stream here would
-      -- break color codes that span read-chunk boundaries)
-      vim.api.nvim_chan_send(chan, (data:gsub("\r?\n", "\r\n")))
-    end
-  end
-
-  -- setup pipes
-  job = {}
-  job.stdout = vim.loop.new_pipe(false)
-  job.stderr = vim.loop.new_pipe(false)
-
-  -- callback when process completes
-  local function on_exit()
-    stop_job()
+  current_job_stop = spawn_glow(buf, glow_cmd(file, win_width, glow.config.pager), function()
+    current_job_stop = nil
     cleanup()
-  end
-
-  -- glow disables colors when its stdout is a pipe (not a tty), so force them
-  -- on. inherit the current environment so glow keeps HOME and the user's real
-  -- COLORTERM/TERM (which decide the color depth glow emits).
-  local env = {}
-  for k, v in pairs(vim.fn.environ()) do
-    table.insert(env, string.format("%s=%s", k, v))
-  end
-  table.insert(env, "CLICOLOR_FORCE=1")
-
-  -- setup and kickoff process
-  local cmd = table.remove(cmd_args, 1)
-  local job_opts = {
-    args = cmd_args,
-    stdio = { nil, job.stdout, job.stderr },
-    env = env,
-  }
-
-  job.handle = vim.loop.spawn(cmd, job_opts, vim.schedule_wrap(on_exit))
-  vim.loop.read_start(job.stdout, vim.schedule_wrap(on_output))
-  vim.loop.read_start(job.stderr, vim.schedule_wrap(on_output))
+  end)
 
   if glow.config.pager then
     vim.cmd("startinsert")
@@ -250,6 +293,146 @@ local function is_md_ext(ext)
   return true
 end
 
+--------------------------------------------------------------------------------
+-- Glow mode: a global toggle (:GlowToggle). While enabled, every markdown
+-- buffer shown in a window is rendered with glow (a read-only, colored preview);
+-- non-markdown buffers are left untouched. To edit, toggle glow mode off, edit,
+-- then toggle it back on.
+--------------------------------------------------------------------------------
+
+---@class GlowMode
+local glow_mode = {
+  enabled = false,
+  ---@type table<integer, integer> source buffer -> preview (terminal) buffer
+  preview_of = {},
+  ---@type table<integer, integer> preview buffer -> source buffer
+  source_of = {},
+  ---@type integer? autocmd group id
+  augroup = nil,
+}
+
+---@param bufnr integer
+---@return boolean
+local function is_markdown_buf(bufnr)
+  local allowed = { "markdown", "markdown.pandoc", "markdown.gfm", "wiki", "vimwiki", "telekasten" }
+  return vim.tbl_contains(allowed, vim.bo[bufnr].filetype)
+end
+
+-- render `source_buf` with glow into a (cached) preview terminal buffer and show
+-- it in `win`
+---@param source_buf integer
+---@param win integer
+local function glow_mode_show(source_buf, win)
+  local preview_buf = glow_mode.preview_of[source_buf]
+
+  if not (preview_buf and vim.api.nvim_buf_is_valid(preview_buf)) then
+    -- dump source content to a temp file so glow never touches the real file
+    local lines = vim.api.nvim_buf_get_lines(source_buf, 0, -1, false)
+    local tmp = vim.fn.tempname() .. ".md"
+    vim.fn.writefile(lines, tmp)
+
+    -- wrap width = window text area (exclude number/sign/fold gutters)
+    local info = vim.fn.getwininfo(win)[1]
+    local width = math.max(1, info.width - (info.textoff or 0))
+
+    preview_buf = vim.api.nvim_create_buf(false, true)
+    -- "hide" (not "wipe") so the preview survives being swapped out of a window
+    vim.api.nvim_buf_set_option(preview_buf, "bufhidden", "hide")
+    vim.api.nvim_buf_set_option(preview_buf, "filetype", "glowpreview")
+    -- q is a convenient way to turn glow mode back off
+    vim.keymap.set("n", "q", function()
+      glow.toggle()
+    end, { silent = true, buffer = preview_buf, nowait = true })
+
+    -- fire-and-forget render; self-cleans on exit and removes its temp file
+    spawn_glow(preview_buf, glow_cmd(tmp, width, false), function()
+      vim.fn.delete(tmp)
+    end)
+
+    glow_mode.preview_of[source_buf] = preview_buf
+    glow_mode.source_of[preview_buf] = source_buf
+  end
+
+  if vim.api.nvim_win_get_buf(win) ~= preview_buf then
+    vim.api.nvim_win_set_buf(win, preview_buf)
+  end
+end
+
+-- if the current window shows a markdown source buffer, render it with glow
+local function glow_mode_refresh_current_win()
+  if not glow_mode.enabled then
+    return
+  end
+  local win = vim.api.nvim_get_current_win()
+  local b = vim.api.nvim_win_get_buf(win)
+  -- skip our own preview buffers (avoids any re-entrancy)
+  if glow_mode.source_of[b] then
+    return
+  end
+  if is_markdown_buf(b) then
+    glow_mode_show(b, win)
+  end
+end
+
+local function glow_mode_enable()
+  if glow_mode.enabled then
+    return
+  end
+  if vim.fn.executable(glow.config.glow_path) == 0 then
+    err(string.format("could not execute glow binary in path=%s", glow.config.glow_path))
+    return
+  end
+
+  glow_mode.enabled = true
+  local group = vim.api.nvim_create_augroup("GlowMode", { clear = true })
+  glow_mode.augroup = group
+
+  -- render markdown buffers as they are shown in a window
+  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "BufEnter" }, {
+    group = group,
+    callback = glow_mode_refresh_current_win,
+  })
+
+  -- render markdown buffers already visible right now
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    local b = vim.api.nvim_win_get_buf(win)
+    if is_markdown_buf(b) and not glow_mode.source_of[b] then
+      glow_mode_show(b, win)
+    end
+  end
+end
+
+local function glow_mode_disable()
+  if not glow_mode.enabled then
+    return
+  end
+  glow_mode.enabled = false
+  if glow_mode.augroup then
+    pcall(vim.api.nvim_del_augroup_by_id, glow_mode.augroup)
+    glow_mode.augroup = nil
+  end
+
+  -- restore the source buffer in any window currently showing a preview
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      local b = vim.api.nvim_win_get_buf(win)
+      local src = glow_mode.source_of[b]
+      if src and vim.api.nvim_buf_is_valid(src) then
+        vim.api.nvim_win_set_buf(win, src)
+      end
+    end
+  end
+
+  -- drop all preview buffers
+  for _, preview_buf in pairs(glow_mode.preview_of) do
+    if vim.api.nvim_buf_is_valid(preview_buf) then
+      pcall(vim.api.nvim_buf_delete, preview_buf, { force = true })
+    end
+  end
+  glow_mode.preview_of = {}
+  glow_mode.source_of = {}
+end
+
 local function run(opts)
   local file
 
@@ -295,14 +478,7 @@ local function run(opts)
 
   stop_job()
 
-  local cmd_args = { glow.config.glow_path, "-s", glow.config.style }
-
-  if glow.config.pager then
-    table.insert(cmd_args, "-p")
-  end
-
-  table.insert(cmd_args, file)
-  open_window(cmd_args)
+  open_window(file)
 end
 
 local function install_glow(opts)
@@ -365,9 +541,23 @@ local function get_executable()
 end
 
 local function create_autocmds()
+  print("hello")
   vim.api.nvim_create_user_command("Glow", function(opts)
     glow.execute(opts)
   end, { complete = "file", nargs = "?", bang = true })
+
+  vim.api.nvim_create_user_command("GlowToggle", function()
+    glow.toggle()
+  end, { desc = "Toggle glow mode: render every markdown buffer with glow" })
+end
+
+-- toggle glow mode: while on, every markdown buffer is rendered with glow
+glow.toggle = function()
+  if glow_mode.enabled then
+    glow_mode_disable()
+  else
+    glow_mode_enable()
+  end
 end
 
 ---@param params Config? custom config
