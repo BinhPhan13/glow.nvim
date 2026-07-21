@@ -320,12 +320,37 @@ local function glow_mode_drop(source_buf)
   end
 end
 
+-- cursor position of `win` as a 0..1 fraction of `buf`'s line count
+---@param win integer
+---@param buf integer
+---@return number
+local function cursor_ratio(win, buf)
+  local line = vim.api.nvim_win_get_cursor(win)[1]
+  return (line - 1) / math.max(1, vim.api.nvim_buf_line_count(buf) - 1)
+end
+
+-- place `win`'s cursor at `ratio` of `buf`'s line count (glow reflows, so this
+-- is an approximate mapping, not an exact source->render position)
+---@param win integer
+---@param buf integer
+---@param ratio number
+local function set_cursor_ratio(win, buf, ratio)
+  if not (vim.api.nvim_win_is_valid(win) and vim.api.nvim_buf_is_valid(buf)) then
+    return
+  end
+  local n = vim.api.nvim_buf_line_count(buf)
+  local line = math.max(1, math.min(n, math.floor(ratio * (n - 1) + 0.5) + 1))
+  pcall(vim.api.nvim_win_set_cursor, win, { line, 0 })
+end
+
 -- render `source_buf` with glow into a (cached) preview terminal buffer and show
--- it in `win`
+-- it in `win`. `on_ready(preview_buf)` fires once the preview is populated.
 ---@param source_buf integer
 ---@param win integer
-local function glow_mode_show(source_buf, win)
+---@param on_ready function? called with the preview buffer once rendered
+local function glow_mode_show(source_buf, win, on_ready)
   local preview_buf = glow_mode.preview_of[source_buf]
+  local rendering = false
 
   if not (preview_buf and vim.api.nvim_buf_is_valid(preview_buf)) then
     -- dump source content to a temp file so glow never touches the real file
@@ -347,8 +372,25 @@ local function glow_mode_show(source_buf, win)
     end, { silent = true, buffer = preview_buf, nowait = true })
 
     -- fire-and-forget render; self-cleans on exit and removes its temp file
+    rendering = true
     spawn_glow(preview_buf, glow_cmd(tmp, width, false), function()
       vim.fn.delete(tmp)
+      if on_ready then
+        -- the terminal keeps painting for a moment after glow exits, so wait
+        -- for the line count to settle before mapping the cursor.
+        -- ponytail: fixed 20ms poll / 500ms cap, fine for a cursor position
+        local last, tries = -1, 0
+        local function settle()
+          local n = vim.api.nvim_buf_line_count(preview_buf)
+          if n == last or tries >= 25 then
+            on_ready(preview_buf)
+          else
+            last, tries = n, tries + 1
+            vim.defer_fn(settle, 20)
+          end
+        end
+        settle()
+      end
     end)
 
     glow_mode.preview_of[source_buf] = preview_buf
@@ -357,6 +399,11 @@ local function glow_mode_show(source_buf, win)
 
   if vim.api.nvim_win_get_buf(win) ~= preview_buf then
     vim.api.nvim_win_set_buf(win, preview_buf)
+  end
+
+  -- cached preview is already populated: run on_ready now
+  if on_ready and not rendering then
+    on_ready(preview_buf)
   end
 end
 
@@ -504,20 +551,25 @@ glow.toggle = function()
   local b = vim.api.nvim_win_get_buf(win)
   local src = glow_mode.source_of[b]
   if src then
-    -- showing preview -> back to source
+    -- showing preview -> back to source, mapping the cursor across
+    local ratio = cursor_ratio(win, b)
     glow_mode.enabled[src] = nil
     if vim.api.nvim_buf_is_valid(src) then
       vim.api.nvim_win_set_buf(win, src)
     end
     glow_mode_drop(src)
+    set_cursor_ratio(win, src, ratio)
   elseif is_markdown_buf(b) then
-    -- showing source -> render preview
+    -- showing source -> render preview, mapping the cursor across
     if vim.fn.executable(glow.config.glow_path) == 0 then
       err(string.format("could not execute glow binary in path=%s", glow.config.glow_path))
       return
     end
+    local ratio = cursor_ratio(win, b)
     glow_mode.enabled[b] = true
-    glow_mode_show(b, win)
+    glow_mode_show(b, win, function(preview_buf)
+      set_cursor_ratio(win, preview_buf, ratio)
+    end)
   else
     err("glow preview only works on markdown files")
   end
