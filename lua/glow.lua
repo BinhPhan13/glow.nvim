@@ -130,18 +130,14 @@ local function spawn_glow(buf, cmd_args, on_done)
       return
     end
     stopped = true
-    if stdout ~= nil then
-      pcall(function()
-        stdout:read_stop()
-      end)
-      safe_close(stdout)
-    end
-    if stderr ~= nil then
-      pcall(function()
-        stderr:read_stop()
-      end)
-      safe_close(stderr)
-    end
+    pcall(function()
+      stdout:read_stop()
+    end)
+    safe_close(stdout)
+    pcall(function()
+      stderr:read_stop()
+    end)
+    safe_close(stderr)
     if handle ~= nil then
       safe_close(handle)
     end
@@ -275,13 +271,16 @@ local function release_file_url()
   return "https://github.com/charmbracelet/glow/releases/download/v" .. version .. "/" .. filename
 end
 
+---@param bufnr integer
+---@return boolean
+local function is_markdown_buf(bufnr)
+  local allowed = { "markdown", "markdown.pandoc", "markdown.gfm", "wiki", "vimwiki", "telekasten" }
+  return vim.tbl_contains(allowed, vim.bo[bufnr].filetype)
+end
+
 ---@return boolean
 local function is_md_ft()
-  local allowed_fts = { "markdown", "markdown.pandoc", "markdown.gfm", "wiki", "vimwiki", "telekasten" }
-  if not vim.tbl_contains(allowed_fts, vim.bo.filetype) then
-    return false
-  end
-  return true
+  return is_markdown_buf(0)
 end
 
 ---@return boolean
@@ -310,13 +309,6 @@ local glow_mode = {
   ---@type integer? autocmd group id
   augroup = nil,
 }
-
----@param bufnr integer
----@return boolean
-local function is_markdown_buf(bufnr)
-  local allowed = { "markdown", "markdown.pandoc", "markdown.gfm", "wiki", "vimwiki", "telekasten" }
-  return vim.tbl_contains(allowed, vim.bo[bufnr].filetype)
-end
 
 -- render `source_buf` with glow into a (cached) preview terminal buffer and show
 -- it in `win`
@@ -541,7 +533,6 @@ local function get_executable()
 end
 
 local function create_autocmds()
-  print("hello")
   vim.api.nvim_create_user_command("Glow", function(opts)
     glow.execute(opts)
   end, { complete = "file", nargs = "?", bang = true })
