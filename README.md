@@ -46,6 +46,13 @@ use {"BinhPhan13/glow.nvim", config = function() require("glow").setup() end}
 {"BinhPhan13/glow.nvim", config = true, cmd = { "Glow", "GlowToggle" }}
 ```
 
+- [vim.pack](https://neovim.io/doc/user/pack.html) (built-in, Neovim 0.12+)
+
+```lua
+vim.pack.add({ { src = "https://github.com/BinhPhan13/glow.nvim" } })
+require("glow").setup()
+```
+
 ## Setup
 
 The script comes with the following defaults:
