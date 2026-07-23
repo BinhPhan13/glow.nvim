@@ -1,9 +1,3 @@
-## Project is now archived!
-
-No more bugfixes or new features are going to be created. If you want to get a nice markdown previewer that is being maintained, please try https://github.com/MeanderingProgrammer/render-markdown.nvim.
-
-<hr/>
-
 <h1 align="center">
   <img src="https://i.postimg.cc/Y9Z030zC/glow-nvim.jpg" />
 </h1>
@@ -14,13 +8,16 @@ No more bugfixes or new features are going to be created. If you want to get a n
     <small>Powered by charm's <a href="https://github.com/charmbracelet/glow">glow</a></small>
   </p>
   <img src="https://img.shields.io/badge/Made%20with%20Lua-blueviolet.svg?style=for-the-badge&logo=lua" />
-  <img src="https://img.shields.io/github/actions/workflow/status/ellisonleao/glow.nvim/default.yml?style=for-the-badge" />
-  
 </div>
 
 https://user-images.githubusercontent.com/178641/215353259-eb8688fb-5600-4b95-89a2-0f286e3b6441.mp4
 
-**Breaking changes are now moved to a fixed topic in Discussions. [Click here](https://github.com/ellisonleao/glow.nvim/discussions/77) to see them**
+> A maintained fork of [ellisonleao/glow.nvim](https://github.com/ellisonleao/glow.nvim) (now archived).
+>
+> On top of the original floating-window preview, this fork adds:
+> - **`:GlowToggle`** — render the current markdown buffer in place, flipping between preview and source (per buffer)
+> - cursor position kept across the preview/source flip
+> - forced glow colors in the preview (glow drops color when its output is piped)
 
 ## Prerequisites
 
@@ -28,12 +25,10 @@ https://user-images.githubusercontent.com/178641/215353259-eb8688fb-5600-4b95-89
 
 ## Installing
 
-[![LuaRocks](https://img.shields.io/luarocks/v/ellisonleao/glow.nvim?logo=lua&color=purple)](https://luarocks.org/modules/ellisonleao/glow.nvim)
-
 - [vim-plug](https://github.com/junegunn/vim-plug)
 
 ```
-Plug 'ellisonleao/glow.nvim'
+Plug 'BinhPhan13/glow.nvim'
 lua << EOF
 require('glow').setup()
 EOF
@@ -42,13 +37,13 @@ EOF
 - [packer.nvim](https://github.com/wbthomason/packer.nvim)
 
 ```lua
-use {"ellisonleao/glow.nvim", config = function() require("glow").setup() end}
+use {"BinhPhan13/glow.nvim", config = function() require("glow").setup() end}
 ```
 
 - [lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ```lua
-{"ellisonleao/glow.nvim", config = true, cmd = { "Glow", "GlowToggle" }}
+{"BinhPhan13/glow.nvim", config = true, cmd = { "Glow", "GlowToggle" }}
 ```
 
 ## Setup
@@ -116,3 +111,4 @@ You can also close the floating window using `q` or `<Esc>` keys
 
 Flips the current markdown buffer between the glow-rendered preview (a read-only,
 colored view) and the editable source. `q` in a preview flips it back to source.
+Your cursor position is kept (approximately) across the flip.
